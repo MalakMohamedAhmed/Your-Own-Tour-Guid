@@ -86,7 +86,7 @@ except ImportError:
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 GROQ_API_KEY    = os.environ.get("GROQ_API_KEY", "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")
-ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "sk_a280e81e4702d56c7f69dfea1c931775cfa9912cd1d066f3")
+ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "sk_dc41ead154be56a5b996af9f17d8e1a5f81b1af0371ebdd9")
 DOCS_FOLDER     = os.path.dirname(os.path.abspath(__file__))
 CHROMA_DIR      = os.path.join(DOCS_FOLDER, ".kemet_chroma_db")
 COLLECTION_NAME = "kemet_scrolls"
@@ -573,6 +573,42 @@ def extract_pdf_text(fpath: str) -> list:
         st.error(f"𓂀 Failed to read '{os.path.basename(fpath)}': {e}")
     return pages
 
+def _mix_voice_with_music(voice_pcm_bytes: bytes, sr: int = 24000) -> bytes:
+    INTRO_S  = 3.0
+    OUTRO_S  = 3.0
+    DB_MUSIC = -14   # ← was -18, now much louder
+
+    # Voice
+    voice = np.frombuffer(voice_pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+    
+    # Debug: print sizes so you can confirm mixing is happening
+    print(f"[TTS DEBUG] voice samples: {len(voice)}, duration: {len(voice)/sr:.1f}s")
+
+    intro_n = int(INTRO_S * sr)
+    outro_n = int(OUTRO_S * sr)
+    total_n = intro_n + len(voice) + outro_n
+
+    # Music bed
+    music = _make_music_bed(total_n, sr)
+    print(f"[TTS DEBUG] music samples: {len(music)}, type: {music.dtype}")
+    
+    music_gain = 10 ** (DB_MUSIC / 20.0)
+    music = music * music_gain
+
+    # Voice sits on top of music
+    end = intro_n + len(voice)
+    music[intro_n:end] += voice
+
+    # Fade out
+    fade = np.linspace(1.0, 0.0, outro_n, dtype=np.float32)
+    music[total_n - outro_n:] *= fade
+
+    # Clip and encode
+    out = np.clip(music, -1.0, 1.0)
+    result = _pcm_to_wav((out * 32767).astype(np.int16), sr)
+    print(f"[TTS DEBUG] final WAV size: {len(result)} bytes")
+    return result
+
 
 def _upsert_chunks(col, ids, embeddings, documents, metadatas, batch=100):
     for b in range(0, len(ids), batch):
@@ -767,11 +803,128 @@ def transcribe_audio(audio_bytes: bytes, ext: str = "webm") -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 # ══════════════════════════════════════════════════════════════════════════════
 # ══════════════════════════════════════════════════════════════════════════════
-# PIPELINE 6 — TTS  (ElevenLabs voice only, no music mixing)
+# PIPELINE 6 — TTS + Egyptian Music Mixing
+# ══════════════════════════════════════════════════════════════════════════════
+# Uses ONLY stdlib (wave, struct) + numpy — zero extra dependencies.
+# Flow:
+#   1. ElevenLabs  →  raw signed-int16 PCM at 24 kHz (output_format="pcm_24000")
+#   2. Synthesise Egyptian ambient music bed (pure numpy)
+#   3. Mix: music at -18 dB | 3-second intro | overlay voice | fade-out 3 s
+#   4. Encode to WAV (stdlib wave) → return bytes → st.audio renders it
 # ══════════════════════════════════════════════════════════════════════════════
 
+import wave as _wave
+
+MUSIC_FILE = os.path.join(DOCS_FOLDER, "egyptian_crop.mp3")   # optional user file
+
+
+def _synth_egyptian_music(n_samples: int, sr: int = 24000) -> np.ndarray:
+    """
+    Pure-numpy Egyptian ambient bed, normalised to [-1, 1] float32.
+    Layers: deep drone · oud partials · tabla pulse · high shimmer.
+    Works at any sample rate.
+    """
+    t = np.linspace(0, n_samples / sr, n_samples, endpoint=False, dtype=np.float32)
+
+    # ── Deep drone (A1 + harmonics) ──────────────────────────────────────────
+    drone = (
+        0.38 * np.sin(2 * np.pi * 55.0  * t) +
+        0.14 * np.sin(2 * np.pi * 110.0 * t) +
+        0.07 * np.sin(2 * np.pi * 165.0 * t)
+    )
+
+    # ── Oud partials with slow vibrato ───────────────────────────────────────
+    vib = 1.0 + 0.003 * np.sin(2 * np.pi * 4.5 * t)
+    oud = (
+        0.18 * np.sin(2 * np.pi * 82.4  * vib * t) +
+        0.08 * np.sin(2 * np.pi * 164.8 * vib * t) +
+        0.04 * np.sin(2 * np.pi * 247.0 * vib * t)
+    )
+
+    # ── Tabla pulse (180 Hz, every 500 ms, 70 ms decay) ──────────────────────
+    tabla = np.zeros(n_samples, dtype=np.float32)
+    step  = int(sr * 0.5)
+    plen  = int(sr * 0.07)
+    tt    = np.linspace(0, 0.07, plen, dtype=np.float32)
+    pulse = (0.16 * np.sin(2 * np.pi * 180 * tt) *
+             np.exp(-np.linspace(0, 8, plen, dtype=np.float32)))
+    for s in range(0, n_samples - plen, step):
+        tabla[s:s + plen] += pulse
+
+    # ── High shimmer (C5 with slow swell) ─────────────────────────────────────
+    swell   = (0.5 + 0.5 * np.sin(2 * np.pi * 0.11 * t)).astype(np.float32)
+    shimmer = 0.035 * swell * np.sin(2 * np.pi * 523.25 * t)
+
+    mix  = drone + oud + tabla + shimmer
+    peak = np.max(np.abs(mix))
+    return (mix / peak * 0.82) if peak > 0 else mix
+
+
+def _make_music_bed(total_samples: int, sr: int = 24000) -> np.ndarray:
+    """Loop / truncate synth music to exactly total_samples."""
+    tile = min(total_samples, int(30 * sr))          # 30-second tile
+    bed  = _synth_egyptian_music(tile, sr)
+    reps = (total_samples // tile) + 2
+    return np.tile(bed, reps)[:total_samples]
+
+
+def _pcm_to_wav(pcm_int16: np.ndarray, sr: int, channels: int = 1) -> bytes:
+    """Encode int16 numpy array → WAV bytes using stdlib only."""
+    buf = io.BytesIO()
+    with _wave.open(buf, "wb") as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(2)          # int16 = 2 bytes
+        wf.setframerate(sr)
+        wf.writeframes(pcm_int16.tobytes())
+    return buf.getvalue()
+
+
+def _make_music_bed(total_samples: int, sr: int = 24000) -> np.ndarray:
+    if os.path.exists(MUSIC_FILE):
+        print(f"[MUSIC DEBUG] Found file: {MUSIC_FILE}")
+        try:
+            import librosa
+            y, orig_sr = librosa.load(MUSIC_FILE, sr=sr, mono=True)
+            print(f"[MUSIC DEBUG] librosa loaded: {len(y)} samples, {len(y)/sr:.1f}s")
+            reps = (total_samples // len(y)) + 2
+            bed  = np.tile(y, reps)[:total_samples]
+            return bed.astype(np.float32)
+        except ImportError:
+            print("[MUSIC DEBUG] librosa not found, trying pydub...")
+        except Exception as e:
+            print(f"[MUSIC DEBUG] librosa failed: {e}")
+        try:
+            from pydub import AudioSegment
+            audio = AudioSegment.from_file(MUSIC_FILE)
+            audio = audio.set_frame_rate(sr).set_channels(1)
+            samples = np.array(audio.get_array_of_samples(), dtype=np.float32)
+            samples /= 32768.0
+            print(f"[MUSIC DEBUG] pydub loaded: {len(samples)} samples")
+            reps = (total_samples // len(samples)) + 2
+            bed  = np.tile(samples, reps)[:total_samples]
+            return bed.astype(np.float32)
+        except ImportError:
+            print("[MUSIC DEBUG] pydub not found either!")
+        except Exception as e:
+            print(f"[MUSIC DEBUG] pydub failed: {e}")
+    else:
+        print(f"[MUSIC DEBUG] FILE NOT FOUND at: {MUSIC_FILE}")
+
+    # Fallback synth
+    print("[MUSIC DEBUG] Falling back to numpy synth!")
+    tile = min(total_samples, int(30 * sr))
+    bed  = _synth_egyptian_music(tile, sr)
+    reps = (total_samples // tile) + 2
+    return np.tile(bed, reps)[:total_samples]
+
+
 def run_tts_pipeline(text: str) -> bytes | None:
-    """Call ElevenLabs and return raw MP3 bytes. Stores error in session state."""
+    """
+    Full pipeline:
+      ElevenLabs PCM → mix with Egyptian music → WAV bytes.
+    Falls back to plain voice-only WAV if mixing fails.
+    Error stored in st.session_state['tts_err'].
+    """
     st.session_state["tts_err"] = ""
     if not TTS_AVAILABLE:
         st.session_state["tts_err"] = "pip install elevenlabs"
@@ -781,21 +934,42 @@ def run_tts_pipeline(text: str) -> bytes | None:
     clean = re.sub(r"\s+", " ", clean)[:4000]
     if not clean:
         return None
+
     try:
+        # Step 1 — ElevenLabs: request raw PCM (no MP3 decoder needed)
         client = ELabs(api_key=ELEVENLABS_API_KEY)
         gen    = client.text_to_speech.convert(
             text=clean,
             voice_id=TTS_VOICE_ID,
             model_id=TTS_MODEL,
-            output_format="mp3_44100_128",
+            output_format="pcm_24000",      # raw signed-int16, 24 kHz, mono
         )
-        data = b"".join(gen)
-        if not data:
+        raw_pcm = b"".join(gen)
+        if not raw_pcm:
             st.session_state["tts_err"] = "ElevenLabs returned 0 bytes"
             return None
-        return data
+
+        # Step 2+3 — mix with Egyptian music bed
+        wav = _mix_voice_with_music(raw_pcm, sr=24000)
+        return wav
+
     except Exception as e:
         st.session_state["tts_err"] = str(e)
+        # Fallback: plain voice without music
+        try:
+            client = ELabs(api_key=ELEVENLABS_API_KEY)
+            gen    = client.text_to_speech.convert(
+                text=clean, voice_id=TTS_VOICE_ID,
+                model_id=TTS_MODEL, output_format="pcm_24000",
+            )
+            raw = b"".join(gen)
+            if raw:
+                st.session_state["tts_err"] += " (playing voice only)"
+                return _pcm_to_wav(
+                    np.frombuffer(raw, dtype=np.int16), sr=24000
+                )
+        except Exception:
+            pass
         return None
 
 
@@ -1115,8 +1289,9 @@ else:
                             mp3_data = st.session_state.tts_cache.get(msg["tts_key"])
 
                         if mp3_data:
-                            st.caption("🔊 Oracle Voice")
-                            st.audio(mp3_data, format="audio/mp3")
+                            fmt = "audio/wav" if mp3_data[:4] == b"RIFF" else "audio/mp3"
+                            st.caption("🔊 Oracle Voice  ·  🎵 Egyptian Music")
+                            st.audio(mp3_data, format=fmt)
                         else:
                             # Show exactly why there is no audio
                             err = st.session_state.get("tts_last_err", "")
