@@ -38,10 +38,10 @@ The system is divided into three primary functional pipelines:
 ## 🛠 Tools & Tech Stack
 * **Frontend:** `Streamlit` (Web Deployment)
 * **LLM Framework:** `LangChain` / `OpenAI` (Storytelling & Reasoning)
-* **Vector Database:** `FAISS` / `ChromaDB` (Efficient Context Retrieval)
+* **Vector Database:** `ChromaDB` (Efficient Context Retrieval)
 * **NLP Tools:** `NLTK`, `Spacy` (Text Preprocessing & Lemmatization)
 * **Computer Vision:** `CNN` / `ResNet` (Image Classification)
-* **Audio Processing:** `Whisper` (STT) & `gTTS` (TTS)
+* **Audio Processing:** `Whisper` (STT) & `ElevenLabs` (TTS)
 * **External API:** `Wikipedia API` (Source Knowledge)
 
 ---
