@@ -1,4 +1,3 @@
-# Your-Own-Tour-Guid
 # 🌍 AI Tour Guide: Your Personal Storyteller
 
 An intelligent, multimodal travel companion designed to replace traditional human tour guides by leveraging **Generative AI** and **RAG (Retrieval-Augmented Generation)**.
