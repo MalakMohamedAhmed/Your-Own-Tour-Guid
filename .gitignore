@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Streamlit
+.streamlit/
+
+# Kemet RAG Specific
+.kemet_chroma_db/
+model/model.pth
+*.mp3
+*.wav
+*.webm
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo

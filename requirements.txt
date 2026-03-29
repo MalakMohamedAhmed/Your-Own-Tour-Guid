@@ -1,0 +1,29 @@
+# KEMET RAG - Dependencies
+
+# Core Web App
+streamlit
+
+# AI & LLM
+groq
+transformers
+nltk
+
+# Vector Database & Retrieval
+chromadb
+sentence-transformers
+
+# Audio & TTS
+elevenlabs
+pydub
+noisereduce
+numpy
+librosa
+
+# Image Classification & Vision
+torch
+torchvision
+pillow
+
+# PDF Extraction
+pdfplumber
+pypdf
